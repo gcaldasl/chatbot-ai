@@ -4,12 +4,15 @@ import { useRef, useState } from "react";
 
 const ACCEPTED_TYPES = ["text/plain", "application/pdf"];
 const ACCEPTED_EXTENSIONS = [".txt", ".pdf"];
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 type ChatMessage = {
   id: string;
-  role: "user";
+  role: "user" | "assistant";
   content: string;
 };
+
+type UploadStatus = "idle" | "uploading" | "ready" | "error";
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -26,42 +29,103 @@ function isAcceptedFile(file: File): boolean {
 
 export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [fileError, setFileError] = useState<string | null>(null);
+  const [documentId, setDocumentId] = useState<string | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
 
     if (!isAcceptedFile(file)) {
-      setFileError("Formato não suportado. Envie um arquivo .txt ou .pdf.");
+      setUploadStatus("error");
+      setUploadError("Formato não suportado. Envie um arquivo .txt ou .pdf.");
       setSelectedFile(null);
+      setDocumentId(null);
       return;
     }
 
-    setFileError(null);
     setSelectedFile(file);
+    setDocumentId(null);
+    setUploadStatus("uploading");
+    setUploadError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch(`${API_URL}/api/documents`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.detail ?? "Falha ao enviar o documento.");
+      }
+
+      const data = await response.json();
+      setDocumentId(data.id);
+      setUploadStatus("ready");
+    } catch (error) {
+      setUploadStatus("error");
+      setUploadError(
+        error instanceof Error ? error.message : "Falha ao enviar o documento."
+      );
+    }
   }
 
   function handleRemoveFile() {
     setSelectedFile(null);
-    setFileError(null);
+    setDocumentId(null);
+    setUploadStatus("idle");
+    setUploadError(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
   }
 
-  function handleSendMessage() {
+  async function handleSendMessage() {
     const trimmed = chatInput.trim();
-    if (!trimmed) return;
+    if (!trimmed || !documentId || isSending) return;
 
     setMessages((prev) => [
       ...prev,
       { id: crypto.randomUUID(), role: "user", content: trimmed },
     ]);
     setChatInput("");
+    setChatError(null);
+    setIsSending(true);
+
+    try {
+      const response = await fetch(`${API_URL}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: documentId, message: trimmed }),
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.detail ?? "Falha ao consultar o assistente.");
+      }
+
+      const data = await response.json();
+      setMessages((prev) => [
+        ...prev,
+        { id: crypto.randomUUID(), role: "assistant", content: data.answer },
+      ]);
+    } catch (error) {
+      setChatError(
+        error instanceof Error ? error.message : "Falha ao consultar o assistente."
+      );
+    } finally {
+      setIsSending(false);
+    }
   }
 
   function handleInputKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -109,9 +173,9 @@ export default function Home() {
               />
             </label>
 
-            {fileError && (
+            {uploadError && (
               <p className="text-xs text-red-600 dark:text-red-400">
-                {fileError}
+                {uploadError}
               </p>
             )}
 
@@ -123,6 +187,8 @@ export default function Home() {
                   </p>
                   <p className="text-xs text-zinc-500 dark:text-zinc-500">
                     {formatFileSize(selectedFile.size)}
+                    {uploadStatus === "uploading" && " · Enviando..."}
+                    {uploadStatus === "ready" && " · Pronto"}
                   </p>
                 </div>
                 <button
@@ -140,32 +206,63 @@ export default function Home() {
             <div className="flex-1 space-y-3 overflow-y-auto p-5">
               {messages.length === 0 ? (
                 <p className="text-sm text-zinc-500 dark:text-zinc-500">
-                  Faça uma pergunta sobre o documento carregado.
+                  {documentId
+                    ? "Faça uma pergunta sobre o documento carregado."
+                    : "Envie um documento para começar a conversa."}
                 </p>
               ) : (
                 messages.map((message) => (
-                  <div key={message.id} className="flex justify-end">
-                    <p className="max-w-[75%] rounded-2xl rounded-br-sm bg-zinc-900 px-4 py-2 text-sm text-zinc-50 dark:bg-zinc-100 dark:text-zinc-900">
+                  <div
+                    key={message.id}
+                    className={`flex ${
+                      message.role === "user" ? "justify-end" : "justify-start"
+                    }`}
+                  >
+                    <p
+                      className={
+                        message.role === "user"
+                          ? "max-w-[75%] rounded-2xl rounded-br-sm bg-zinc-900 px-4 py-2 text-sm text-zinc-50 dark:bg-zinc-100 dark:text-zinc-900"
+                          : "max-w-[75%] rounded-2xl rounded-bl-sm bg-zinc-100 px-4 py-2 text-sm text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
+                      }
+                    >
                       {message.content}
                     </p>
                   </div>
                 ))
               )}
+              {isSending && (
+                <div className="flex justify-start">
+                  <p className="max-w-[75%] rounded-2xl rounded-bl-sm bg-zinc-100 px-4 py-2 text-sm text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                    Pensando...
+                  </p>
+                </div>
+              )}
             </div>
+
+            {chatError && (
+              <p className="px-5 text-xs text-red-600 dark:text-red-400">
+                {chatError}
+              </p>
+            )}
 
             <div className="flex items-end gap-2 border-t border-zinc-200 p-4 dark:border-zinc-800">
               <textarea
                 value={chatInput}
                 onChange={(event) => setChatInput(event.target.value)}
                 onKeyDown={handleInputKeyDown}
-                placeholder="Digite sua pergunta..."
+                placeholder={
+                  documentId
+                    ? "Digite sua pergunta..."
+                    : "Envie um documento primeiro"
+                }
+                disabled={!documentId}
                 rows={1}
-                className="flex-1 resize-none rounded-lg border border-zinc-300 bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:text-zinc-100 dark:focus:border-zinc-500"
+                className="flex-1 resize-none rounded-lg border border-zinc-300 bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-100 dark:focus:border-zinc-500"
               />
               <button
                 type="button"
                 onClick={handleSendMessage}
-                disabled={!chatInput.trim()}
+                disabled={!chatInput.trim() || !documentId || isSending}
                 className="shrink-0 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
               >
                 Enviar
