@@ -95,8 +95,11 @@ class ChatResponse(BaseModel):
 def extract_text(filename: str, content: bytes) -> str:
     if filename.lower().endswith(".pdf"):
         reader = PdfReader(io.BytesIO(content))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
-    return content.decode("utf-8", errors="ignore")
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    else:
+        text = content.decode("utf-8", errors="ignore")
+
+    return text.replace("\x00", "")
 
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -176,7 +179,8 @@ async def process_document(document_id: uuid.UUID, filename: str, content: bytes
                 len(chunks),
             )
     except Exception as exc:
-        message = getattr(exc, "detail", str(exc))
+        message = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        message = message or exc.__class__.__name__
         await pool.execute(
             "UPDATE documents SET status = 'failed', error = $2 WHERE id = $1",
             document_id,

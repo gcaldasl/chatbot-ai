@@ -160,10 +160,8 @@ export default function Home() {
     const trimmed = chatInput.trim();
     if (!trimmed || uploadStatus !== "ready" || !documentId || isSending) return;
 
-    setMessages((prev) => [
-      ...prev,
-      { id: crypto.randomUUID(), role: "user", content: trimmed },
-    ]);
+    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: trimmed };
+    setMessages((prev) => [...prev, userMessage]);
     setChatInput("");
     setChatError(null);
     setIsSending(true);
@@ -174,6 +172,15 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ document_id: documentId, message: trimmed }),
       });
+
+      if (response.status === 409) {
+        setMessages((prev) => prev.filter((message) => message.id !== userMessage.id));
+        setChatInput(trimmed);
+        setUploadStatus("processing");
+        activeDocumentIdRef.current = documentId;
+        pollDocumentStatus(documentId);
+        return;
+      }
 
       if (!response.ok) {
         const body = await response.json().catch(() => null);
