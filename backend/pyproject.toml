@@ -9,5 +9,28 @@ dependencies = [
     "fastapi[standard]>=0.141.1",
     "numpy>=2.5.3",
     "pgvector>=0.5.0",
+    "pydantic-settings>=2.15.0",
     "pypdf>=6.19.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.8",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# B008: FastAPI's Depends()/File()/Query() as argument defaults is the
+# framework's documented, intended pattern, not the mutable-default footgun
+# this rule targets elsewhere.
+ignore = ["B008"]
