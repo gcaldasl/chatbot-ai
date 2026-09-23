@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const ACCEPTED_TYPES = ["text/plain", "application/pdf"];
 const ACCEPTED_EXTENSIONS = [".txt", ".pdf"];
@@ -18,7 +18,14 @@ type ChatMessage = {
   sources?: Source[];
 };
 
-type UploadStatus = "idle" | "uploading" | "ready" | "error";
+type UploadStatus = "idle" | "uploading" | "processing" | "ready" | "error";
+
+type DocumentMeta = {
+  characters: number;
+  chunks: number;
+};
+
+const POLL_INTERVAL_MS = 2000;
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -36,6 +43,7 @@ function isAcceptedFile(file: File): boolean {
 export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
+  const [documentMeta, setDocumentMeta] = useState<DocumentMeta | null>(null);
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -43,21 +51,69 @@ export default function Home() {
   const [isSending, setIsSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeDocumentIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
+    };
+  }, []);
+
+  function stopPolling() {
+    activeDocumentIdRef.current = null;
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+  }
+
+  async function pollDocumentStatus(id: string) {
+    if (activeDocumentIdRef.current !== id) return;
+
+    try {
+      const response = await fetch(`${API_URL}/api/documents/${id}`);
+      if (!response.ok) throw new Error("Falha ao verificar status do documento.");
+      const data = await response.json();
+
+      if (activeDocumentIdRef.current !== id) return;
+
+      if (data.status === "ready") {
+        setUploadStatus("ready");
+        setDocumentMeta({ characters: data.characters, chunks: data.chunks });
+      } else if (data.status === "failed") {
+        setUploadStatus("error");
+        setUploadError(data.error ?? "Falha ao processar o documento.");
+      } else {
+        pollTimeoutRef.current = setTimeout(() => pollDocumentStatus(id), POLL_INTERVAL_MS);
+      }
+    } catch (error) {
+      if (activeDocumentIdRef.current !== id) return;
+      setUploadStatus("error");
+      setUploadError(
+        error instanceof Error ? error.message : "Falha ao verificar status do documento."
+      );
+    }
+  }
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
+
+    stopPolling();
 
     if (!isAcceptedFile(file)) {
       setUploadStatus("error");
       setUploadError("Formato não suportado. Envie um arquivo .txt ou .pdf.");
       setSelectedFile(null);
       setDocumentId(null);
+      setDocumentMeta(null);
       return;
     }
 
     setSelectedFile(file);
     setDocumentId(null);
+    setDocumentMeta(null);
     setUploadStatus("uploading");
     setUploadError(null);
 
@@ -77,7 +133,9 @@ export default function Home() {
 
       const data = await response.json();
       setDocumentId(data.id);
-      setUploadStatus("ready");
+      setUploadStatus("processing");
+      activeDocumentIdRef.current = data.id;
+      pollDocumentStatus(data.id);
     } catch (error) {
       setUploadStatus("error");
       setUploadError(
@@ -87,8 +145,10 @@ export default function Home() {
   }
 
   function handleRemoveFile() {
+    stopPolling();
     setSelectedFile(null);
     setDocumentId(null);
+    setDocumentMeta(null);
     setUploadStatus("idle");
     setUploadError(null);
     if (fileInputRef.current) {
@@ -98,7 +158,7 @@ export default function Home() {
 
   async function handleSendMessage() {
     const trimmed = chatInput.trim();
-    if (!trimmed || !documentId || isSending) return;
+    if (!trimmed || uploadStatus !== "ready" || !documentId || isSending) return;
 
     setMessages((prev) => [
       ...prev,
@@ -199,8 +259,15 @@ export default function Home() {
                   <p className="text-xs text-zinc-500 dark:text-zinc-500">
                     {formatFileSize(selectedFile.size)}
                     {uploadStatus === "uploading" && " · Enviando..."}
-                    {uploadStatus === "ready" && " · Pronto"}
+                    {uploadStatus === "processing" && " · Processando..."}
+                    {uploadStatus === "ready" &&
+                      ` · Pronto${documentMeta ? ` (${documentMeta.chunks} trechos)` : ""}`}
                   </p>
+                  {uploadStatus === "processing" && (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-500">
+                      Isso pode levar alguns minutos para arquivos grandes.
+                    </p>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -217,8 +284,10 @@ export default function Home() {
             <div className="flex-1 space-y-3 overflow-y-auto p-5">
               {messages.length === 0 ? (
                 <p className="text-sm text-zinc-500 dark:text-zinc-500">
-                  {documentId
+                  {uploadStatus === "ready"
                     ? "Faça uma pergunta sobre o documento carregado."
+                    : uploadStatus === "processing"
+                    ? "Aguarde o processamento do documento..."
                     : "Envie um documento para começar a conversa."}
                 </p>
               ) : (
@@ -280,18 +349,20 @@ export default function Home() {
                 onChange={(event) => setChatInput(event.target.value)}
                 onKeyDown={handleInputKeyDown}
                 placeholder={
-                  documentId
+                  uploadStatus === "ready"
                     ? "Digite sua pergunta..."
+                    : uploadStatus === "processing"
+                    ? "Processando documento..."
                     : "Envie um documento primeiro"
                 }
-                disabled={!documentId}
+                disabled={uploadStatus !== "ready"}
                 rows={1}
                 className="flex-1 resize-none rounded-lg border border-zinc-300 bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-100 dark:focus:border-zinc-500"
               />
               <button
                 type="button"
                 onClick={handleSendMessage}
-                disabled={!chatInput.trim() || !documentId || isSending}
+                disabled={!chatInput.trim() || uploadStatus !== "ready" || isSending}
                 className="shrink-0 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
               >
                 Enviar
