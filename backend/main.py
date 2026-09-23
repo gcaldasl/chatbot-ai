@@ -75,8 +75,14 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class Source(BaseModel):
+    index: int
+    excerpt: str
+
+
 class ChatResponse(BaseModel):
     answer: str
+    sources: list[Source]
 
 
 def extract_text(filename: str, content: bytes) -> str:
@@ -180,15 +186,18 @@ async def chat(request: ChatRequest):
         question_embedding,
         TOP_K,
     )
-    context = "\n\n---\n\n".join(row["content"] for row in rows)
+    sources = [Source(index=i + 1, excerpt=row["content"]) for i, row in enumerate(rows)]
+    context = "\n\n".join(f"[{source.index}] {source.excerpt}" for source in sources)
 
     messages = [
         {
             "role": "system",
             "content": (
-                "You answer questions using only the excerpts below, retrieved from the "
-                "uploaded document. If the answer isn't in the excerpts, say you don't know. "
-                "Reply in the same language the question was asked in.\n\n"
+                "You answer questions using only the numbered excerpts below, retrieved from "
+                "the uploaded document. Cite the excerpt number(s) you relied on inline, right "
+                "after the relevant part of your answer, like [1] or [2][3]. If the answer "
+                "isn't in the excerpts, say you don't know and cite nothing. Reply in the same "
+                "language the question was asked in.\n\n"
                 f"Excerpts:\n{context}"
             ),
         },
@@ -206,4 +215,4 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=502, detail="LLM request failed.")
 
     answer = response.json()["choices"][0]["message"]["content"]
-    return ChatResponse(answer=answer)
+    return ChatResponse(answer=answer, sources=sources)

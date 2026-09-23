@@ -6,10 +6,16 @@ const ACCEPTED_TYPES = ["text/plain", "application/pdf"];
 const ACCEPTED_EXTENSIONS = [".txt", ".pdf"];
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+type Source = {
+  index: number;
+  excerpt: string;
+};
+
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  sources?: Source[];
 };
 
 type UploadStatus = "idle" | "uploading" | "ready" | "error";
@@ -117,7 +123,12 @@ export default function Home() {
       const data = await response.json();
       setMessages((prev) => [
         ...prev,
-        { id: crypto.randomUUID(), role: "assistant", content: data.answer },
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: data.answer,
+          sources: data.sources,
+        },
       ]);
     } catch (error) {
       setChatError(
@@ -214,8 +225,8 @@ export default function Home() {
                 messages.map((message) => (
                   <div
                     key={message.id}
-                    className={`flex ${
-                      message.role === "user" ? "justify-end" : "justify-start"
+                    className={`flex flex-col ${
+                      message.role === "user" ? "items-end" : "items-start"
                     }`}
                   >
                     <p
@@ -227,6 +238,24 @@ export default function Home() {
                     >
                       {message.content}
                     </p>
+                    {message.sources && message.sources.length > 0 && (
+                      <details className="mt-1 max-w-[75%] text-xs text-zinc-500 dark:text-zinc-400">
+                        <summary className="cursor-pointer select-none">
+                          Fontes ({message.sources.length})
+                        </summary>
+                        <ol className="mt-1 space-y-1">
+                          {message.sources.map((source) => (
+                            <li
+                              key={source.index}
+                              className="rounded-lg bg-zinc-50 p-2 dark:bg-zinc-900"
+                            >
+                              <span className="font-medium">[{source.index}]</span>{" "}
+                              {source.excerpt}
+                            </li>
+                          ))}
+                        </ol>
+                      </details>
+                    )}
                   </div>
                 ))
               )}
