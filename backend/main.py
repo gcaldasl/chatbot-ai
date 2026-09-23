@@ -1,11 +1,14 @@
 import io
 import os
 import uuid
+from contextlib import asynccontextmanager
 
+import asyncpg
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pgvector.asyncpg import register_vector
 from pydantic import BaseModel
 from pypdf import PdfReader
 
@@ -13,10 +16,51 @@ load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-MAX_DOCUMENT_CHARS = 12000
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDING_DIMENSIONS = 1536
+OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://zuraio:zuraio@localhost:5432/zuraio")
 
-app = FastAPI(title="Agente de Conhecimento API")
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 150
+TOP_K = 5
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS documents (
+                id UUID PRIMARY KEY,
+                filename TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        await conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS chunks (
+                id SERIAL PRIMARY KEY,
+                document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                chunk_index INT NOT NULL,
+                content TEXT NOT NULL,
+                embedding VECTOR({EMBEDDING_DIMENSIONS}) NOT NULL
+            )
+            """
+        )
+    finally:
+        await conn.close()
+
+    app.state.db_pool = await asyncpg.create_pool(DATABASE_URL, init=register_vector)
+    yield
+    await app.state.db_pool.close()
+
+
+app = FastAPI(title="Agente de Conhecimento API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,8 +68,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-documents: dict[str, dict] = {}
 
 
 class ChatRequest(BaseModel):
@@ -44,6 +86,35 @@ def extract_text(filename: str, content: bytes) -> str:
     return content.decode("utf-8", errors="ignore")
 
 
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunk = text[start : start + chunk_size].strip()
+        if chunk:
+            chunks.append(chunk)
+        start += chunk_size - overlap
+    return chunks
+
+
+async def embed_texts(texts: list[str]) -> list[list[float]]:
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured on the server.")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            OPENAI_EMBEDDINGS_URL,
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={"model": EMBEDDING_MODEL, "input": texts},
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail="Embedding request failed.")
+
+    data = response.json()["data"]
+    return [item["embedding"] for item in sorted(data, key=lambda item: item["index"])]
+
+
 @app.post("/api/documents")
 async def upload_document(file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith((".txt", ".pdf")):
@@ -54,29 +125,71 @@ async def upload_document(file: UploadFile = File(...)):
     if not text:
         raise HTTPException(status_code=422, detail="Could not extract text from the document.")
 
-    document_id = str(uuid.uuid4())
-    documents[document_id] = {"filename": file.filename, "text": text}
-    return {"id": document_id, "filename": file.filename, "characters": len(text)}
+    chunks = chunk_text(text)
+    if not chunks:
+        raise HTTPException(status_code=422, detail="Could not split the document into chunks.")
+
+    embeddings = await embed_texts(chunks)
+
+    document_id = uuid.uuid4()
+    pool: asyncpg.Pool = app.state.db_pool
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "INSERT INTO documents (id, filename) VALUES ($1, $2)",
+            document_id,
+            file.filename,
+        )
+        await conn.executemany(
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding) VALUES ($1, $2, $3, $4)",
+            [
+                (document_id, index, chunk, embedding)
+                for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
+            ],
+        )
+
+    return {
+        "id": str(document_id),
+        "filename": file.filename,
+        "characters": len(text),
+        "chunks": len(chunks),
+    }
 
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    document = documents.get(request.document_id)
+    try:
+        document_id = uuid.UUID(request.document_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Document not found. Upload a document first.")
+
+    pool: asyncpg.Pool = app.state.db_pool
+    document = await pool.fetchrow("SELECT id FROM documents WHERE id = $1", document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found. Upload a document first.")
 
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured on the server.")
+    [question_embedding] = await embed_texts([request.message])
 
-    context = document["text"][:MAX_DOCUMENT_CHARS]
+    rows = await pool.fetch(
+        """
+        SELECT content FROM chunks
+        WHERE document_id = $1
+        ORDER BY embedding <=> $2
+        LIMIT $3
+        """,
+        document_id,
+        question_embedding,
+        TOP_K,
+    )
+    context = "\n\n---\n\n".join(row["content"] for row in rows)
+
     messages = [
         {
             "role": "system",
             "content": (
-                "You answer questions using only the document below. "
-                "If the answer isn't in the document, say you don't know. "
+                "You answer questions using only the excerpts below, retrieved from the "
+                "uploaded document. If the answer isn't in the excerpts, say you don't know. "
                 "Reply in the same language the question was asked in.\n\n"
-                f"Document:\n{context}"
+                f"Excerpts:\n{context}"
             ),
         },
         {"role": "user", "content": request.message},
@@ -84,7 +197,7 @@ async def chat(request: ChatRequest):
 
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
-            OPENAI_URL,
+            OPENAI_CHAT_URL,
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             json={"model": OPENAI_MODEL, "messages": messages},
         )
