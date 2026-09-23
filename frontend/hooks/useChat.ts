@@ -2,15 +2,25 @@
 
 import { useState, type KeyboardEvent } from "react";
 import { useDocumentContext } from "@/context/DocumentContext";
+import type { ErrorKind } from "@/i18n";
 import { ApiError, sendChatMessage } from "@/lib/api";
 import type { ChatMessage } from "@/types";
+
+function chatErrorKind(error: unknown): ErrorKind {
+  if (error instanceof ApiError) {
+    if (error.status === 404) return "document-not-found";
+    if (error.status === 422) return "document-processing-failed";
+    if (error.status === 502) return "llm-unavailable";
+  }
+  return "chat-failed";
+}
 
 export function useChat() {
   const { documentId, uploadStatus, resumePolling } = useDocumentContext();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [chatError, setChatError] = useState<string | null>(null);
+  const [chatError, setChatError] = useState<ErrorKind | null>(null);
 
   async function sendMessage() {
     const trimmed = chatInput.trim();
@@ -39,7 +49,7 @@ export function useChat() {
         return;
       }
 
-      setChatError(error instanceof Error ? error.message : "Falha ao consultar o assistente.");
+      setChatError(chatErrorKind(error));
     } finally {
       setIsSending(false);
     }

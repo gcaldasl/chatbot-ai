@@ -5,6 +5,11 @@ import type {
   UploadDocumentResponse,
 } from "@/types";
 
+/** Thrown for any non-2xx response. `message` is the backend's own (English)
+ * detail text when available — treat it as technical/secondary information,
+ * not localized UI copy. Callers should pick user-facing text from
+ * `messages.errors` based on `status` instead of displaying `message`
+ * directly. */
 export class ApiError extends Error {
   status: number;
 
@@ -15,9 +20,9 @@ export class ApiError extends Error {
   }
 }
 
-async function extractErrorMessage(response: Response, fallback: string): Promise<string> {
+async function extractErrorMessage(response: Response): Promise<string> {
   const body = await response.json().catch(() => null);
-  return body?.detail ?? fallback;
+  return body?.detail ?? response.statusText ?? `HTTP ${response.status}`;
 }
 
 export async function uploadDocument(file: File): Promise<UploadDocumentResponse> {
@@ -30,7 +35,7 @@ export async function uploadDocument(file: File): Promise<UploadDocumentResponse
   });
 
   if (!response.ok) {
-    throw new ApiError(response.status, await extractErrorMessage(response, "Falha ao enviar o documento."));
+    throw new ApiError(response.status, await extractErrorMessage(response));
   }
 
   return response.json();
@@ -40,7 +45,7 @@ export async function fetchDocumentStatus(id: string): Promise<DocumentStatusRes
   const response = await fetch(`${API_URL}/api/documents/${id}`);
 
   if (!response.ok) {
-    throw new ApiError(response.status, "Falha ao verificar status do documento.");
+    throw new ApiError(response.status, await extractErrorMessage(response));
   }
 
   return response.json();
@@ -54,7 +59,7 @@ export async function sendChatMessage(documentId: string, message: string): Prom
   });
 
   if (!response.ok) {
-    throw new ApiError(response.status, await extractErrorMessage(response, "Falha ao consultar o assistente."));
+    throw new ApiError(response.status, await extractErrorMessage(response));
   }
 
   return response.json();

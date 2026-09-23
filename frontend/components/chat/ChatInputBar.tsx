@@ -2,6 +2,7 @@
 
 import type { KeyboardEvent } from "react";
 import { useDocumentContext } from "@/context/DocumentContext";
+import { useLocaleContext } from "@/context/LocaleContext";
 
 type ChatInputBarProps = {
   value: string;
@@ -13,6 +14,7 @@ type ChatInputBarProps = {
 
 export function ChatInputBar({ value, onChange, onKeyDown, onSend, isSending }: ChatInputBarProps) {
   const { uploadStatus } = useDocumentContext();
+  const { messages } = useLocaleContext();
   const isReady = uploadStatus === "ready";
 
   return (
@@ -23,10 +25,10 @@ export function ChatInputBar({ value, onChange, onKeyDown, onSend, isSending }: 
         onKeyDown={onKeyDown}
         placeholder={
           isReady
-            ? "Digite sua pergunta..."
+            ? messages.chat.placeholderReady
             : uploadStatus === "processing"
-            ? "Processando documento..."
-            : "Envie um documento primeiro"
+            ? messages.chat.placeholderProcessing
+            : messages.chat.placeholderIdle
         }
         disabled={!isReady}
         rows={1}
@@ -38,7 +40,7 @@ export function ChatInputBar({ value, onChange, onKeyDown, onSend, isSending }: 
         disabled={!value.trim() || !isReady || isSending}
         className="shrink-0 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
       >
-        Enviar
+        {messages.chat.send}
       </button>
     </div>
   );

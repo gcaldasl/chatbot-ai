@@ -1,17 +1,34 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { ErrorKind } from "@/i18n";
 import { ApiError, fetchDocumentStatus, uploadDocument } from "@/lib/api";
 import { POLL_INTERVAL_MS } from "@/lib/constants";
 import type { DocumentMeta, UploadStatus } from "@/types";
 import { isAcceptedFile } from "@/utils/fileValidation";
+
+function uploadErrorKind(error: unknown): ErrorKind {
+  if (error instanceof ApiError) {
+    if (error.status === 400) return "unsupported-file-type";
+    if (error.status === 413) return "file-too-large";
+  }
+  return "upload-failed";
+}
+
+function statusCheckErrorKind(error: unknown): ErrorKind {
+  if (error instanceof ApiError && error.status === 404) return "document-not-found";
+  return "status-check-failed";
+}
 
 export function useDocumentUpload() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
   const [documentMeta, setDocumentMeta] = useState<DocumentMeta | null>(null);
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<ErrorKind | null>(null);
+  // The backend's own (English) reason, kept only as optional secondary/technical
+  // detail alongside the localized `uploadError` — never shown as the primary message.
+  const [uploadErrorDetail, setUploadErrorDetail] = useState<string | null>(null);
 
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeDocumentIdRef = useRef<string | null>(null);
@@ -42,16 +59,16 @@ export function useDocumentUpload() {
         setDocumentMeta({ characters: data.characters ?? 0, chunks: data.chunks ?? 0 });
       } else if (data.status === "failed") {
         setUploadStatus("error");
-        setUploadError(data.error ?? "Falha ao processar o documento.");
+        setUploadError("document-processing-failed");
+        setUploadErrorDetail(data.error);
       } else {
         pollTimeoutRef.current = setTimeout(() => pollDocumentStatus(id), POLL_INTERVAL_MS);
       }
     } catch (error) {
       if (activeDocumentIdRef.current !== id) return;
       setUploadStatus("error");
-      setUploadError(
-        error instanceof Error ? error.message : "Falha ao verificar status do documento."
-      );
+      setUploadError(statusCheckErrorKind(error));
+      setUploadErrorDetail(error instanceof Error ? error.message : null);
     }
   }
 
@@ -69,7 +86,8 @@ export function useDocumentUpload() {
 
     if (!isAcceptedFile(file)) {
       setUploadStatus("error");
-      setUploadError("Formato não suportado. Envie um arquivo .txt ou .pdf.");
+      setUploadError("unsupported-file-type");
+      setUploadErrorDetail(null);
       setSelectedFile(null);
       setDocumentId(null);
       setDocumentMeta(null);
@@ -81,6 +99,7 @@ export function useDocumentUpload() {
     setDocumentMeta(null);
     setUploadStatus("uploading");
     setUploadError(null);
+    setUploadErrorDetail(null);
 
     try {
       const data = await uploadDocument(file);
@@ -88,11 +107,8 @@ export function useDocumentUpload() {
       resumePolling(data.id);
     } catch (error) {
       setUploadStatus("error");
-      setUploadError(
-        error instanceof ApiError || error instanceof Error
-          ? error.message
-          : "Falha ao enviar o documento."
-      );
+      setUploadError(uploadErrorKind(error));
+      setUploadErrorDetail(error instanceof Error ? error.message : null);
     }
   }
 
@@ -103,6 +119,7 @@ export function useDocumentUpload() {
     setDocumentMeta(null);
     setUploadStatus("idle");
     setUploadError(null);
+    setUploadErrorDetail(null);
   }
 
   return {
@@ -111,6 +128,7 @@ export function useDocumentUpload() {
     documentMeta,
     uploadStatus,
     uploadError,
+    uploadErrorDetail,
     selectFile,
     removeFile,
     resumePolling,
